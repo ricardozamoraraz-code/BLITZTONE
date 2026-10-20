@@ -14,6 +14,12 @@ public sealed class WardogAimController
  public string RcsAttempt=>Volatile.Read(ref _rcsAttempt);
  public WardogReader.Frame LockedFrame(WardogReader.Frame frame) => Volatile.Read(ref _target)?.Filter(frame)
   ?? WardogReader.Frame.Empty("Waiting for a new aim-key press");
+ public WardogAimSettings LockedSettings(WardogAimSettings settings)
+ {
+  var target=Volatile.Read(ref _target);
+  return target is {SelectedBone:>=0}?settings with
+   {Bone=target.SelectedBone,BoneMask=WardogAimSettings.BoneMaskForIndex(target.SelectedBone),RandomizeBone=false}:settings;
+ }
  private readonly object _lifecycle=new();
  private CancellationTokenSource _cancel; private Task _worker=Task.CompletedTask;
  public void Update(WardogReader.Frame frame,WardogAimSettings settings,int width,int height,bool menu,WardogReader.CameraFrame camera,WardogRcsSettings rcs=null)

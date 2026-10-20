@@ -8,6 +8,8 @@ namespace MystieHook.Games.Wardog;
 // Menu adapter only; the monitor and overlay can be reused by a replacement UI.
 public sealed partial class WardogGame : IGame
 {
+    private readonly Dictionary<(ulong World,ulong Controller,ulong Pawn,ulong Address,ulong State,ulong Mesh,ulong Asset,int Bone,WardogAimBoneMask BoneMask),
+        (WardogPrediction.Dot Dot,long At)> _predictionDisplayCache = new();
     private readonly WardogAimController _aimController = new();
     private bool _captureAimKey;
     private WardogArtillerySettings _artillery = new();
@@ -87,23 +89,40 @@ public sealed partial class WardogGame : IGame
         _aimController.Update(frame,aim,(int)size.X,(int)size.Y,!UiVisibility.MenusHidden || _calibration.BlocksAim,camera,_monitor.Rcs);
         bool aimHeld = aim.Enabled && MystieHook.Input.InputManager.IsKeyDown(aim.Key);
         var targetFrame = aimHeld ? _aimController.LockedFrame(frame) : frame;
+        var displayAim=aimHeld?_aimController.LockedSettings(aim):aim;
         if (aim.ShowPrediction)
         {
             var draw = ImGui.GetForegroundDrawList();
+            long predictionNow=Stopwatch.GetTimestamp();
             foreach(var player in targetFrame.Players)
             {
-                if(WardogPrediction.ForPlayer(targetFrame,player,aim,(int)size.X,(int)size.Y) is not WardogPrediction.Dot dot)continue;
+                var key=(targetFrame.WorldAddress,targetFrame.LocalController,targetFrame.LocalPawn,
+                    player.Address,player.SourceState,player.SourceMesh,player.SourceAsset,displayAim.Bone,displayAim.BoneMask);
+                var current=WardogPrediction.ForPlayer(targetFrame,player,displayAim,(int)size.X,(int)size.Y);
+                WardogPrediction.Dot dot;
+                if(current is WardogPrediction.Dot freshDot)
+                {
+                    dot=freshDot;
+                    _predictionDisplayCache[key]=(dot,predictionNow);
+                }
+                else if(_predictionDisplayCache.TryGetValue(key,out var previous)
+                    &&Stopwatch.GetElapsedTime(previous.At,predictionNow).TotalMilliseconds<=100)
+                    dot=previous.Dot;
+                else continue;
                 var point=ImGui.GetMainViewport().Pos+dot.Point;
                 draw.AddCircleFilled(point,aim.PredictionDotRadius,aim.HeadPredictionColor|0xFF000000,16);
                 if(aim.ShowPredictionDetails)draw.AddText(point+new System.Numerics.Vector2(6,0),0xE6FFFFFF,$"{dot.DistanceMetres:0}m / {dot.FlightSeconds:0.00}s");
             }
+            foreach(var key in _predictionDisplayCache.Where(entry=>Stopwatch.GetElapsedTime(entry.Value.At,predictionNow).TotalMilliseconds>100).Select(entry=>entry.Key).ToArray())
+                _predictionDisplayCache.Remove(key);
         }
+        else _predictionDisplayCache.Clear();
         if(aim.Enabled || aim.ShowPrediction)
         {
             var draw=ImGui.GetForegroundDrawList();var origin=ImGui.GetMainViewport().Pos;var center=origin+size/2;
             if(aim.ShowFov)draw.AddCircle(center,aim.Fov,ImGui.GetColorU32(ImGuiCol.CheckMark),96);
             if(aimHeld && aim.TargetLine
-                && WardogAimSettings.Select(targetFrame,aim,(int)size.X,(int)size.Y) is System.Numerics.Vector2 target)
+                && WardogAimSettings.Select(targetFrame,displayAim,(int)size.X,(int)size.Y) is System.Numerics.Vector2 target)
                 draw.AddLine(center,origin+target,aim.LineColor,1.5f);
         }
         var display = _monitor.ObservedRenderFrame();
@@ -117,13 +136,33 @@ public sealed partial class WardogGame : IGame
         var s=_monitor.Aim;
         bool enabled=s.Enabled,team=s.TeamCheck,line=s.TargetLine,fovShown=s.ShowFov,prediction=s.ShowPrediction,aimPrediction=s.UsePrediction;
         float fov=s.Fov,distance=s.Distance;int bone=s.Bone,key=s.Key,targetMode=(int)s.AimTarget;
+        var boneMask=s.BoneMask;bool multipleBones=boneMask!=WardogAimBoneMask.None,randomizeBone=s.RandomizeBone;
         var color=ImGui.ColorConvertU32ToFloat4(s.LineColor);
         MenuTools.Checkbox("Enable aim",ref enabled);
         SafeText.Wrapped($"Last aim attempt: {_aimController.LastAttempt}");
         SafeText.Disabled("Camera calibration supports ADS zoom using the current FOV. Separate in-game ADS sensitivity may change the feel.");
         if(!s.UseCalibration || s.Calibration is not {Valid:true})
             ImGui.TextWrapped("Aim movement requires an enabled calibration profile. Calibrate below or apply a saved Aim configuration.");
-        MenuTools.Combo("Target bone",ref bone,"Head\0Neck\0Chest\0Pelvis\0Smart\0");
+        MenuTools.Checkbox("Choose from multiple bones",ref multipleBones);
+        if(!multipleBones)
+        {
+            boneMask=WardogAimBoneMask.None;randomizeBone=false;
+            MenuTools.Combo("Target bone",ref bone,"Head\0Neck\0Chest\0Pelvis\0Smart\0");
+        }
+        else
+        {
+            if(boneMask==WardogAimBoneMask.None)
+                boneMask=bone switch {0=>WardogAimBoneMask.Head,1=>WardogAimBoneMask.Neck,2=>WardogAimBoneMask.Chest,3=>WardogAimBoneMask.Pelvis,_=>WardogAimBoneMask.Head|WardogAimBoneMask.Neck|WardogAimBoneMask.Chest|WardogAimBoneMask.Pelvis};
+            bool head=(boneMask&WardogAimBoneMask.Head)!=0,neck=(boneMask&WardogAimBoneMask.Neck)!=0;
+            bool chest=(boneMask&WardogAimBoneMask.Chest)!=0,pelvis=(boneMask&WardogAimBoneMask.Pelvis)!=0;
+            if(MenuTools.Checkbox("Head",ref head))boneMask=head?boneMask|WardogAimBoneMask.Head:boneMask&~WardogAimBoneMask.Head;
+            ImGui.SameLine();if(MenuTools.Checkbox("Neck",ref neck))boneMask=neck?boneMask|WardogAimBoneMask.Neck:boneMask&~WardogAimBoneMask.Neck;
+            ImGui.SameLine();if(MenuTools.Checkbox("Chest",ref chest))boneMask=chest?boneMask|WardogAimBoneMask.Chest:boneMask&~WardogAimBoneMask.Chest;
+            ImGui.SameLine();if(MenuTools.Checkbox("Pelvis",ref pelvis))boneMask=pelvis?boneMask|WardogAimBoneMask.Pelvis:boneMask&~WardogAimBoneMask.Pelvis;
+            MenuTools.Checkbox("Randomize selected bone once per aim-key press",ref randomizeBone);
+            SafeText.Disabled("Without randomization, the closest selected bone is chosen on lock and stays fixed until you release the aim key.");
+            if(boneMask==WardogAimBoneMask.None){multipleBones=false;randomizeBone=false;}
+        }
         MenuTools.Combo("Aim Target",ref targetMode,"Closest to crosshair\0Closest to me\0");
         if(targetMode==(int)WardogAimTarget.ClosestToMe)SafeText.Wrapped("Chooses the nearest player inside the aim FOV; equal distances favor the player closest to your crosshair.");
         SafeText.Wrapped("Locks one player per key hold. Temporary missing data pauses aim; it resumes only on that player. Release and press again to select another player.");
@@ -158,7 +197,7 @@ public sealed partial class WardogGame : IGame
         if(_captureAimKey&&ImGui.Button("Cancel key capture"))_captureAimKey=false;
         ImGui.TextWrapped("Hold the aim key with the menu hidden. Uses Makcu connected in Settings; no local mouse fallback. Team check requires a confirmed enemy. Unresolved factions and unreliable bones can prevent or misplace targets.");
         ImGui.TextUnformatted(MystieHook.Input.Device.connected ? "Makcu connected" : "Makcu disconnected: movement disabled");
-        _monitor.Aim=s with {Enabled=enabled,ShowPrediction=prediction,UsePrediction=aimPrediction,AimTarget=(WardogAimTarget)targetMode,Fov=fov,ShowFov=fovShown,Key=key,Bone=bone,TargetLine=line,LineColor=ImGui.ColorConvertFloat4ToU32(color),TeamCheck=team,Distance=distance};
+        _monitor.Aim=s with {Enabled=enabled,ShowPrediction=prediction,UsePrediction=aimPrediction,AimTarget=(WardogAimTarget)targetMode,Fov=fov,ShowFov=fovShown,Key=key,Bone=bone,BoneMask=multipleBones?boneMask:WardogAimBoneMask.None,RandomizeBone=multipleBones&&randomizeBone,TargetLine=line,LineColor=ImGui.ColorConvertFloat4ToU32(color),TeamCheck=team,Distance=distance};
         DrawCalibrationControls();
     }
 
