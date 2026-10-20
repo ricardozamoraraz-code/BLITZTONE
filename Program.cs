@@ -88,7 +88,7 @@ namespace MystieHook
         {
             JobSystem.Start(workers: 3);
             var choice = AskUiChoice(args);
-            var (title, drawLoop) = ResolveUi(UiChoice.Game);
+            var (title, drawLoop) = ResolveUi(choice);
 
             StartupDiagnostics.Record("Creating graphics window");
             using var win = new OverlayWindow(title, 1100, 700);
